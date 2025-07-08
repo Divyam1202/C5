@@ -154,27 +154,37 @@ def from_coord_to_uv(hist_size, u, v):
 
 
 def to_tensor(im, dims=3):
-  """ Converts a given ndarray image to torch tensor image.
+    """
+    Converts a numpy array into a torch tensor with correct shape.
+    
+    Args:
+        im (np.ndarray): Input array.
+        dims (int): Expected dimension mode.
+                    - 3: shape (H, W, C) -> (C, H, W)
+                    - 4: shape (H, W, C, N) -> (N, C, H, W)
+    
+    Returns:
+        torch.Tensor: Tensor with correct shape.
+    """
+    if dims == 3:
+        if im.ndim == 2:
+            # 2D image or histogram (e.g., (C, bins))
+            return torch.from_numpy(im).float()
+        elif im.ndim == 3:
+            # Standard (H, W, C) image or histogram
+            return torch.from_numpy(im.transpose((2, 0, 1))).float()
+        else:
+            raise ValueError(f"Unexpected input shape {im.shape} for dims=3")
 
-  Args:
-    im: ndarray image (height x width x channel x [sample]).
-    dims: dimension number of the given image. If dims = 3, the image should
-      be in (height x width x channel) format; while if dims = 4, the image
-      should be in (height x width x channel x sample) format; default is 3.
+    elif dims == 4:
+        if im.ndim == 4:
+            # Batch input (H, W, C, N)
+            return torch.from_numpy(im.transpose((3, 2, 0, 1))).float()
+        else:
+            raise ValueError(f"Unexpected input shape {im.shape} for dims=4")
 
-  Returns:
-    torch tensor in the format (channel x height x width)  or (sample x
-      channel x height x width).
-  """
-
-  assert (dims == 3 or dims == 4)
-  if dims == 3:
-    im = im.transpose((2, 0, 1))
-  elif dims == 4:
-    im = im.transpose((3, 2, 0, 1))
-  else:
-    raise NotImplementedError
-  return torch.from_numpy(im)
+    else:
+        raise NotImplementedError(f"dims={dims} not supported")
 
 
 def complex_multiplication(a, b):
@@ -422,7 +432,7 @@ def im2double(im):
     input image in floating-point format [0-1].
   """
 
-  if im[0].dtype == 'uint8':
+  if im[0].dtype == 'uint8':  
     max_value = 255
   elif im[0].dtype == 'uint16':
     max_value = 65535

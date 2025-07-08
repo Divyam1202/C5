@@ -154,15 +154,15 @@ class network(nn.Module):
 
     # convolving over the histogram in the frequency domain
     # comment out this part if torch 1.8 or higher is used.
-    N_fft = torch.rfft(N[:, :2, :, :], 2, onesided=False)
-    F_fft = torch.rfft(F, 2, onesided=False)
-    N_after_conv = torch.irfft(ops.complex_multiplication(N_fft, F_fft), 2,
-                               onesided=False)
+    # N_fft = torch.rfft(N[:, :2, :, :], 2, onesided=False)
+    # F_fft = torch.rfft(F, 2, onesided=False)
+    # N_after_conv = torch.irfft(ops.complex_multiplication(N_fft, F_fft), 2,
+    #                            onesided=False)
 
     # uncomment this part if torch 1.8 or higher is used.
-    # N_fft = fft.rfft2(N[:, :2, :, :])
-    # F_fft = fft.rfft2(F)
-    # N_after_conv = fft.irfft2(N_fft * F_fft)
+    N_fft = torch.fft.rfft2(N[:, :2, :, :])
+    F_fft = torch.fft.rfft2(F)
+    N_after_conv = torch.fft.irfft2(N_fft * F_fft)
 
 
 

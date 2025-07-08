@@ -13,7 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-
+import imageio.v3 as iio
+import torchvision.transforms.functional as TF
 import argparse
 import logging
 import os
@@ -28,50 +29,34 @@ from torchvision.utils import save_image
 from torchvision.utils import make_grid
 
 
+import os
+import logging
+import torch
+import numpy as np
+from torch.utils.data import DataLoader
+from torchvision.utils import make_grid, save_image
+import torchvision.transforms.functional as TF
+from scipy.io import savemat
+import src.dataset as dataset
+
+
 def test_net(net, device, dir_img, batch_size=64, input_size=64, data_num=7,
              g=False, model_name='c5_model', load_hist=False,
              white_balance=False, multiple_test=False, files=None,
              cross_validation=False, save_output=True):
-  """ Tests C5 network.
+    """ Tests C5 network with optional white balance correction and result saving. """
 
-  Args:
-    net: network object (c5.network).
-    device: use 'cpu' or 'cuda' (string).
-    dir_img: full path of testing set directory (string).
-    batch_size: mini-batch size; default value is 64.
-    input_size: Number of bins in histogram; default is 64.
-    data_num: number of input histograms to C5 network (m in the paper);
-      default value is 7.
-    g: boolean flag to learn the gain multiplier map G; default value
-      is True.
-    model_name: Name of the trained model; default is 'c5_model'.
-    load_hist: boolean flag to load histograms from beginning (if exists in the
-      image directory); default value is True.
-    white_balance: boolean to perform a diagonal correction using the estimated
-      illuminant color and save output images in harddisk. The saved images
-      will be located in white_balanced_images/model_name/.; default is False.
-    multiple_test: boolean flag to perform ten tests as described in the
-      paper; default is False.
-    files: a list to override loading files located in dir_img; default is
-      None.
-    cross_validation: boolean flag to use three-fold cross-validation on
-      files located in the 'dir_img' directory; default value is False.
-    save_output: boolean flag to save the results in results/model_name/.;
-      default is True.
-  """
+    if files is None:
+        files = dataset.Data.load_files(dir_img)
 
-  if files is None:
-    files = dataset.Data.load_files(dir_img)
+    batch_size = min(batch_size, len(files))
 
-  batch_size = min(batch_size, len(files))
+    test = dataset.Data(files, input_size=input_size, mode='testing',
+                        data_num=data_num, load_hist=load_hist)
+    test_loader = DataLoader(test, batch_size=batch_size, shuffle=False,
+                             num_workers=0, pin_memory=True)
 
-  test = dataset.Data(files, input_size=input_size, mode='testing',
-                      data_num=data_num,
-                      load_hist=load_hist)
-  test_loader = DataLoader(test, batch_size=batch_size, shuffle=False,
-                           num_workers=8, pin_memory=True)
-
-  logging.info(f'''Starting testing:
+    logging.info(f'''Starting testing:
         Model Name:            {model_name}
         Batch size:            {batch_size}
         Number of input:       {data_num}
@@ -85,83 +70,76 @@ def test_net(net, device, dir_img, batch_size=64, input_size=64, data_num=7,
         Device:                {device.type}
     ''')
 
-  if multiple_test:
-    number_of_tests = 10
-  else:
-    number_of_tests = 1
+    result_path = os.path.join('results', model_name)
+    os.makedirs(result_path, exist_ok=True)
 
-  if white_balance:
-    save_filter_dir_wb = os.path.join('white_balanced_images', model_name)
-    if not os.path.exists(save_filter_dir_wb):
-      if not os.path.exists('white_balanced_images'):
-        os.mkdir('white_balanced_images')
-      os.mkdir(save_filter_dir_wb)
-      logging.info(f'Created visualization directory {save_filter_dir_wb}')
+    if white_balance:
+        save_filter_dir_wb = os.path.join('white_balanced_images', model_name)
+        os.makedirs(save_filter_dir_wb, exist_ok=True)
+        logging.info(f'Created visualization directory {save_filter_dir_wb}')
 
-  with torch.no_grad():
-    for test_i in range(number_of_tests):
-      results = np.zeros((len(test), 3))  # to store estimated illuminant values
-      gt = np.zeros((len(test), 3))  # to store ground-truth illuminant colors
-      filenames = []  # to store filenames
-      index = 0
+    with torch.no_grad():
+        number_of_tests = 10 if multiple_test else 1
 
-      for batch in test_loader:
-        model_histogram = batch['model_input_histograms']
-        model_histogram = model_histogram.to(device=device,
-                                             dtype=torch.float32)
-        file_names = batch['file_name']
-        
-        if white_balance:
-          image = batch['image_rgb']
-          image = image.to(device=device, dtype=torch.float32)
+        for test_i in range(number_of_tests):
+            results = np.zeros((len(test), 3))
+            gt = np.zeros((len(test), 3))
+            filenames = []
+            index = 0
 
+            for batch in test_loader:
+                model_histogram = batch['model_input_histograms'].to(device=device, dtype=torch.float32)
+                histogram = batch['histogram'].to(device=device, dtype=torch.float32)
+                gt_ill = batch['gt_ill'].to(device=device, dtype=torch.float32)
+                file_names = batch['file_name']
+                image = batch['image_rgb'].to(device=device, dtype=torch.float32)
 
-        histogram = batch['histogram']
-        histogram = histogram.to(device=device, dtype=torch.float32)
+                predicted_ill, _, _, _, _ = net(histogram, model_in_N=model_histogram)
 
-        gt_ill = batch['gt_ill']
-        gt_ill = gt_ill.to(device=device, dtype=torch.float32)
+                if white_balance and test_i == 0:
+                    bs = image.shape[0]
+                    for c in range(3):
+                        correction_ratio = predicted_ill[:, 1] / predicted_ill[:, c]
+                        correction_ratio = correction_ratio.view(bs, 1, 1)
+                        image[:, c, :, :] = image[:, c, :, :] * correction_ratio
 
-        predicted_ill, _, _, _, _ = net(histogram, model_in_N=model_histogram)
+                    image = 1 * torch.pow(image, 1.0 / 2.19921875)
+                    for b in range(bs):
+                        save_image(make_grid(image[b, :, :, :], nrow=1), os.path.join(
+                            save_filter_dir_wb, file_names[b]))
 
-        if white_balance and test_i == 0:
-          bs = image.shape[0]
-          for c in range(3):
-            correction_ratio = predicted_ill[:, 1] / predicted_ill[:, c]
-            correction_ratio = correction_ratio.view(bs, 1, 1)
-            image[:, c, :, :] = image[:, c, :, :] * correction_ratio
+                # Save corrected predicted output image
+                for idx in range(image.shape[0]):
+                    img_tensor = image[idx]
+                    file_name = file_names[idx]
+                    pred_ill = predicted_ill[idx]
 
-          image = 1 * torch.pow(image, 1.0 / 2.19921875)
-          for b in range(bs):
-            save_image(make_grid(image[b, :, :, :], nrow=1), os.path.join(
-              save_filter_dir_wb, file_names[b]))
+                    correction = 1.0 / (pred_ill + 1e-6)
+                    corrected = img_tensor * correction.view(3, 1, 1)
+                    corrected = torch.clamp(corrected / corrected.max(), 0, 1)
 
-        L = len(predicted_ill)
-        results[index:index + L, :] = predicted_ill.cpu().numpy()
-        gt[index:index + L, :] = gt_ill.cpu().numpy()
-        for f in file_names:
-            filenames.append(f)
-        index = index + L
+                    corrected_img = TF.to_pil_image(corrected.cpu())
+                    save_path = os.path.join(result_path, file_name.replace(".png", "_corrected.png"))
+                    corrected_img.save(save_path)
+                    logging.info(f"Saved corrected image: {save_path}")
 
-      if save_output:
-        save_dir = os.path.join('results', model_name)
-        if not os.path.exists(save_dir):
-          if not os.path.exists('results'):
-            os.mkdir('results')
-          os.mkdir(save_dir)
-          logging.info(f'Created results directory {save_dir}')
-        if multiple_test:
-          savemat(os.path.join(save_dir, f'gt_{test_i + 1}.mat'), {'gt': gt})
-          savemat(os.path.join(save_dir, f'results_{test_i + 1}.mat'),
-                  {'predicted': results})
-          savemat(os.path.join(save_dir, f'filenames_{test_i + 1}.mat'),
-                  {'filenames': filenames})
-        else:
-          savemat(os.path.join(save_dir, 'gt.mat'), {'gt': gt})
-          savemat(os.path.join(save_dir, 'results.mat'), {'predicted': results})
-          savemat(os.path.join(save_dir, 'filenames.mat'), {'filenames': filenames})
+                L = len(predicted_ill)
+                results[index:index + L, :] = predicted_ill.cpu().numpy()
+                gt[index:index + L, :] = gt_ill.cpu().numpy()
+                filenames.extend(file_names)
+                index += L
 
-  logging.info('End of testing')
+            if save_output:
+                if multiple_test:
+                    savemat(os.path.join(result_path, f'gt_{test_i + 1}.mat'), {'gt': gt})
+                    savemat(os.path.join(result_path, f'results_{test_i + 1}.mat'), {'predicted': results})
+                    savemat(os.path.join(result_path, f'filenames_{test_i + 1}.mat'), {'filenames': filenames})
+                else:
+                    savemat(os.path.join(result_path, 'gt.mat'), {'gt': gt})
+                    savemat(os.path.join(result_path, 'results.mat'), {'predicted': results})
+                    savemat(os.path.join(result_path, 'filenames.mat'), {'filenames': filenames})
+
+    logging.info('End of testing')
 
 
 def get_args():
@@ -224,7 +202,8 @@ if __name__ == '__main__':
   logging.info(f'Using device {device}')
 
   net = c5.network(input_size=args.input_size, learn_g=args.g_multiplier,
-                   data_num=args.data_num, device=device)
+                 data_num=args.data_num, device=str(device))
+
 
   if args.cross_validation:
     dataset_name = os.path.basename(args.in_tedir)
